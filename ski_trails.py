@@ -1,407 +1,236 @@
 #!/usr/bin/env python3
 """
-Fetch live Ski API (RapidAPI: Ski Resorts and Conditions) data and print trail/run/lift
-status in a simple table. API key is read from .env (RAPIDAPI_KEY).
+Display live lift and run (trail) status using ski-resort-status
+(https://github.com/marcushyett/ski-lift-status, npm: ski-resort-status).
+
+Requires Node.js and: npm install
 
 Usage:
-  python ski_trails.py                    # prompt for resort slug
-  python ski_trails.py palisades          # resort slug as argument
-  python ski_trails.py --list-resorts     # list resort slugs (RapidAPI if available, else Liftie on GitHub)
+  npm install
+  python ski_trails.py --list-resorts
+  python ski_trails.py les-trois-vallees
+  python ski_trails.py --raw-json espace-diamant
 """
 
 from __future__ import annotations
 
 import argparse
 import json
-import os
-import re
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote
-
-import requests
-from dotenv import load_dotenv
-
-RAPIDAPI_HOST = "ski-resorts-and-conditions.p.rapidapi.com"
-BASE_URL = f"https://{RAPIDAPI_HOST}"
-
-# Slugs that changed or merged in the upstream feed (Liftie / Ski API).
-RESORT_SLUG_ALIASES: dict[str, str] = {
-    "alpine": "palisades",
-    "alpine-meadows": "palisades",
-    "squaw": "palisades",
-    "squaw-valley": "palisades",
-}
 
 _SCRIPT_DIR = Path(__file__).resolve().parent
+_BRIDGE = _SCRIPT_DIR / "node" / "ski_resort_bridge.cjs"
 
 
-def load_dotenv_file() -> None:
-    load_dotenv(_SCRIPT_DIR / ".env")
-
-
-def load_api_key(required: bool = True) -> str:
-    load_dotenv_file()
-    key = (os.environ.get("RAPIDAPI_KEY") or "").strip()
-    if not key and required:
+def run_bridge(arg: str | None) -> dict[str, Any]:
+    if not _BRIDGE.is_file():
         print(
-            "Missing RAPIDAPI_KEY. Add it to .env (see .env.example).",
+            f"Missing {_BRIDGE}. Run: npm install",
             file=sys.stderr,
         )
         sys.exit(1)
-    return key
-
-
-def api_headers(key: str) -> dict[str, str]:
-    return {
-        "X-RapidAPI-Key": key,
-        "X-RapidAPI-Host": RAPIDAPI_HOST,
-    }
-
-
-def resolve_resort_slug(slug: str) -> str:
-    key = slug.strip().lower()
-    if key in RESORT_SLUG_ALIASES:
-        resolved = RESORT_SLUG_ALIASES[key]
+    cmd = ["node", str(_BRIDGE)]
+    if arg is not None:
+        cmd.append(arg)
+    try:
+        proc = subprocess.run(
+            cmd,
+            cwd=_SCRIPT_DIR,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+    except subprocess.TimeoutExpired:
+        print("Node bridge timed out.", file=sys.stderr)
+        sys.exit(1)
+    except FileNotFoundError:
         print(
-            f"Note: using slug {resolved!r} (Ski API name for former {slug!r}).",
+            "Node.js not found. Install from https://nodejs.org/ and ensure `node` is on PATH.",
             file=sys.stderr,
         )
-        return resolved
-    return slug.strip()
-
-
-def fetch_resort(key: str, slug: str) -> dict[str, Any]:
-    url = f"{BASE_URL}/v1/resort/{quote(slug, safe='')}"
-    r = requests.get(url, headers=api_headers(key), timeout=30)
-    if r.status_code != 200:
-        err = r.text[:500]
-        print(f"HTTP {r.status_code}: {err}", file=sys.stderr)
-        if r.status_code == 404:
-            print(
-                "Try: python ski_trails.py --list-resorts   (valid slugs change over time; "
-                "e.g. Palisades Tahoe is palisades, not alpine).",
-                file=sys.stderr,
-            )
         sys.exit(1)
-    body = r.json()
-    if isinstance(body, dict) and "data" in body:
-        return body["data"]
-    if isinstance(body, dict):
-        return body
-    print("Unexpected JSON shape from API.", file=sys.stderr)
-    sys.exit(1)
+    raw = (proc.stdout or "").strip()
+    if not raw:
+        err = (proc.stderr or "").strip() or f"exit {proc.returncode}"
+        print(f"Bridge failed: {err}", file=sys.stderr)
+        sys.exit(1)
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        print("Invalid JSON from bridge:\n", raw[:2000], file=sys.stderr)
+        sys.exit(1)
 
 
-def try_fetch_resort_index_api(key: str) -> Any | None:
-    """
-    Some RapidAPI plans expose an index endpoint; many do not. Return parsed JSON or None.
-    """
-    candidates = (
-        "/v1/export",
-        "/export",
-        "/v1/resorts",
-        "/resorts",
-        "/v1/all",
-        "/api/meta",
-        "/meta",
-    )
-    for path in candidates:
-        url = BASE_URL + path
-        r = requests.get(url, headers=api_headers(key), timeout=120)
-        if r.status_code != 200:
+def fmt(v: Any) -> str:
+    if v is None:
+        return "—"
+    if isinstance(v, bool):
+        return "yes" if v else "no"
+    if isinstance(v, (list, dict)):
+        return json.dumps(v, ensure_ascii=False)
+    s = str(v).strip()
+    return s if s else "—"
+
+
+def print_supported_resorts(payload: dict[str, Any]) -> None:
+    resorts = payload.get("resorts")
+    if not isinstance(resorts, list):
+        print("Unexpected list payload.", file=sys.stderr)
+        sys.exit(1)
+    print("Supported resorts (ski-resort-status / OpenSkiMap-backed)")
+    print(f"{'id':<28}  {'platform':<12}  name")
+    print("-" * 80)
+    for r in sorted(resorts, key=lambda x: str(x.get("id", "")).lower()):
+        if not isinstance(r, dict):
             continue
-        try:
-            return r.json()
-        except json.JSONDecodeError:
-            continue
-    return None
+        rid = str(r.get("id", "?"))[:28]
+        plat = str(r.get("platform", "?"))[:12]
+        name = r.get("name", "")
+        print(f"{rid:<28}  {plat:<12}  {name}")
 
 
-def _github_next_url(link_header: str) -> str | None:
-    if not link_header:
-        return None
-    for part in link_header.split(","):
-        if 'rel="next"' not in part:
-            continue
-        m = re.search(r"<([^>]+)>", part.strip())
-        return m.group(1) if m else None
-    return None
+LIFT_LINES: list[tuple[str, str]] = [
+    ("status", "Status"),
+    ("liftType", "Lift type"),
+    ("operating", "Operating now"),
+    ("openingStatus", "Opening status"),
+    ("openingTimesReal", "Hours (reported)"),
+    ("openingTimesTheoretic", "Hours (scheduled)"),
+    ("capacity", "Capacity (p/h)"),
+    ("duration", "Duration (min)"),
+    ("length", "Length (m)"),
+    ("speed", "Speed (m/s)"),
+    ("departureAltitude", "Bottom alt (m)"),
+    ("arrivalAltitude", "Top alt (m)"),
+    ("uphillCapacity", "Uphill capacity"),
+    ("message", "Message"),
+    ("openskimap_ids", "OpenSkiMap lift IDs"),
+]
 
 
-def fetch_liftie_slugs_from_github() -> list[str]:
-    """
-    Directory names under github.com/pirxpilot/liftie/lib/resorts — same slugs the Ski API
-    (Liftie-based) uses for /v1/resort/{slug}.
-    """
-    headers = {
-        "Accept": "application/vnd.github.v3+json",
-        "User-Agent": "skimap-ski-trails/1.0",
-    }
-    url: str | None = "https://api.github.com/repos/pirxpilot/liftie/contents/lib/resorts"
-    params: dict[str, str] | None = {"ref": "main", "per_page": "100"}
-    slugs: list[str] = []
-    first = True
-    while url:
-        r = requests.get(
-            url,
-            params=params if first else None,
-            headers=headers,
-            timeout=60,
-        )
-        if r.status_code != 200:
-            print(
-                f"GitHub resort list failed: HTTP {r.status_code} {r.text[:400]}",
-                file=sys.stderr,
-            )
-            sys.exit(1)
-        page = r.json()
-        if not isinstance(page, list):
-            print("Unexpected GitHub API response.", file=sys.stderr)
-            sys.exit(1)
-        for item in page:
-            if isinstance(item, dict) and item.get("type") == "dir" and item.get("name"):
-                slugs.append(str(item["name"]))
-        first = False
-        params = None
-        url = _github_next_url(r.headers.get("Link", ""))
-    return sorted(slugs, key=str.lower)
+RUN_LINES: list[tuple[str, str]] = [
+    ("status", "Status"),
+    ("level", "Difficulty"),
+    ("trailType", "Trail type"),
+    ("operating", "Operating now"),
+    ("openingStatus", "Opening status"),
+    ("openingTimesReal", "Hours (reported)"),
+    ("openingTimesTheoretic", "Hours (scheduled)"),
+    ("groomingStatus", "Grooming"),
+    ("snowQuality", "Snow quality"),
+    ("length", "Length (m)"),
+    ("averageSlope", "Avg slope (°)"),
+    ("surface", "Surface"),
+    ("departureAltitude", "Top alt (m)"),
+    ("arrivalAltitude", "Bottom alt (m)"),
+    ("exposure", "Exposure"),
+    ("guaranteedSnow", "Guaranteed snow"),
+    ("message", "Message"),
+    ("openskimap_ids", "OpenSkiMap run IDs"),
+]
 
 
-def _iter_slug_name_pairs(payload: Any) -> list[tuple[str, str]]:
-    """Normalize various index/export JSON shapes into (slug, display_name) rows."""
-    if isinstance(payload, list):
-        items = payload
-    elif isinstance(payload, dict):
-        for k in ("data", "resorts", "meta", "items"):
-            v = payload.get(k)
-            if isinstance(v, list):
-                return _iter_slug_name_pairs(v)
-        # Mapping slug -> resort object
-        if payload and all(isinstance(v, dict) for v in payload.values()):
-            out: list[tuple[str, str]] = []
-            for slug, info in payload.items():
-                name = info.get("name") or info.get("title") or str(slug)
-                out.append((str(slug), str(name)))
-            return sorted(out, key=lambda x: x[0].lower())
-        return []
+def _print_entity_block(title: str, items: list[dict[str, Any]], field_rows: list[tuple[str, str]]) -> None:
+    print(f"\n=== {title} ({len(items)}) ===\n")
+    for item in sorted(items, key=lambda x: str(x.get("name", "")).lower()):
+        name = item.get("name", "?")
+        print(name)
+        print("-" * min(72, max(len(str(name)), 8)))
+        for key, label in field_rows:
+            if key not in item:
+                continue
+            val = item[key]
+            if val is None or val == "" or val == []:
+                continue
+            if key == "openskimap_ids" and isinstance(val, list):
+                val = ", ".join(str(x) for x in val[:6])
+                if len(item.get("openskimap_ids") or []) > 6:
+                    val += ", …"
+            print(f"  {label}: {fmt(val)}")
+        print()
+
+
+def print_resort_report(data: dict[str, Any]) -> None:
+    resort = data.get("resort") or {}
+    rname = resort.get("name", "?")
+    rid = resort.get("id", "?")
+    osm = resort.get("openskimap_id", "")
+    print(f"Resort: {rname}")
+    print(f"id: {rid}")
+    if osm:
+        print(f"OpenSkiMap: https://openskimap.org/?obj=skiArea&id={osm}")
+
+    lifts = data.get("lifts") or []
+    runs = data.get("runs") or []
+    if not isinstance(lifts, list):
+        lifts = []
+    if not isinstance(runs, list):
+        runs = []
+
+    if lifts:
+        _print_entity_block("Lifts", lifts, LIFT_LINES)
     else:
-        return []
+        print("\n(No lift list in response.)\n")
 
-    rows: list[tuple[str, str]] = []
-    for item in items:
-        if not isinstance(item, dict):
-            continue
-        slug = (
-            item.get("slug")
-            or item.get("id")
-            or item.get("code")
-            or item.get("name")
-        )
-        if slug is None:
-            continue
-        title = item.get("name") or item.get("title") or str(slug)
-        rows.append((str(slug), str(title)))
-    return sorted(rows, key=lambda x: x[0].lower())
-
-
-def _status_map_from_block(block: Any) -> dict[str, str]:
-    if not isinstance(block, dict):
-        return {}
-    status = block.get("status")
-    if isinstance(status, dict):
-        return {str(k): str(v) for k, v in status.items()}
-    return {}
-
-
-def _pairs_from_list(items: list[Any]) -> list[tuple[str, str]]:
-    pairs: list[tuple[str, str]] = []
-    for item in items:
-        if not isinstance(item, dict):
-            continue
-        name = item.get("name") or item.get("title") or item.get("id")
-        if name is None:
-            continue
-        st: str | None = None
-        if "status" in item:
-            st = str(item["status"])
-        elif "state" in item:
-            st = str(item["state"])
-        elif item.get("open") is not None:
-            st = "open" if item.get("open") else "closed"
-        if st is not None:
-            pairs.append((str(name), st))
-    return pairs
-
-
-def extract_trail_like(data: dict[str, Any]) -> tuple[str, list[tuple[str, str]]]:
-    """Return (source_description, sorted list of (name, raw_status))."""
-    for section_key, label in (
-        ("trails", "Trails"),
-        ("runs", "Runs"),
-        ("terrain", "Terrain"),
-    ):
-        block = data.get(section_key)
-        if isinstance(block, dict):
-            m = _status_map_from_block(block)
-            if m:
-                return (label, sorted(m.items(), key=lambda x: x[0].lower()))
-        if isinstance(block, list):
-            pairs = _pairs_from_list(block)
-            if pairs:
-                return (label, sorted(pairs, key=lambda x: x[0].lower()))
-
-    lifts = data.get("lifts")
-    if isinstance(lifts, dict):
-        m = _status_map_from_block(lifts)
-        if m:
-            return (
-                "Lifts (API does not expose separate trail/run status for this resort)",
-                sorted(m.items(), key=lambda x: x[0].lower()),
-            )
-
-    return ("", [])
-
-
-def normalize_status(raw: str) -> tuple[str, str]:
-    """
-    Return (short_label, human_readable).
-    short_label is OPEN, CLOSED, HOLD, or UNKNOWN.
-    """
-    s = raw.strip().lower()
-    if s in ("open", "yes", "true", "1", "on"):
-        return ("OPEN", "Open")
-    if s in ("closed", "no", "false", "0", "off"):
-        return ("CLOSED", "Closed")
-    if s in ("hold", "on-hold", "on hold", "stopped"):
-        return ("HOLD", "On hold")
-    if s in ("scheduled", "schedule"):
-        return ("SCHEDULED", "Scheduled")
-    if not s:
-        return ("UNKNOWN", "Unknown")
-    return ("OTHER", raw.strip())
-
-
-def print_resort_table(slug: str, data: dict[str, Any]) -> None:
-    name = data.get("name") or data.get("title") or slug
-    source, rows = extract_trail_like(data)
-    if not rows:
-        print(f"Resort: {name} ({slug})")
-        print("No trail, run, or lift status data found in this response.")
-        return
-
-    print(f"Resort: {name} ({slug})")
-    print(f"Data: {source}")
-    cond = data.get("conditions")
-    if isinstance(cond, dict) and cond:
-        base = cond.get("base")
-        season = cond.get("season")
-        parts = []
-        if base is not None:
-            parts.append(f"base {base} cm")
-        if season is not None:
-            parts.append(f"season {season} cm")
-        if parts:
-            print(f"Snow: {', '.join(parts)}")
-    print()
-
-    col_name = "Name"
-    col_stat = "Open?"
-    col_raw = "Raw status"
-    w = max(len(col_name), max(len(r[0]) for r in rows))
-    header = f"{col_name.ljust(w)}  {col_stat.ljust(8)}  {col_raw}"
-    print(header)
-    print("-" * len(header))
-    for trail_name, raw in rows:
-        short, human = normalize_status(raw)
-        open_yes = short == "OPEN"
-        flag = "Yes" if open_yes else "No"
-        print(f"{trail_name.ljust(w)}  {flag.ljust(8)}  {human}")
-
-
-def print_resort_index_rows(rows: list[tuple[str, str]], source_note: str) -> None:
-    print(source_note)
-    print(f"{'Slug':<32}  Name")
-    print("-" * 76)
-    for slug, title in rows:
-        print(f"{slug[:32]:<32}  {title}")
-
-
-def print_resort_slug_only_list(slugs: list[str]) -> None:
-    print(
-        "Source: Liftie resort folders on GitHub (slug = path name; matches Ski API /v1/resort/{slug}).",
-    )
-    print(f"{'Slug':<36}")
-    print("-" * 40)
-    for s in slugs:
-        print(s)
+    if runs:
+        _print_entity_block("Runs (trails)", runs, RUN_LINES)
+    else:
+        print("(No run/trail list in response.)\n")
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Ski API (RapidAPI) — print trail/run/lift open status.",
+        description="Live lift & run status via ski-resort-status (Node).",
     )
     parser.add_argument(
         "resort",
         nargs="?",
-        help="Resort slug (e.g. palisades, brighton). Omit to be prompted.",
+        help="Resort id (see --list-resorts). Omit to be prompted.",
     )
     parser.add_argument(
         "--list-resorts",
         action="store_true",
-        help="List resort slugs (RapidAPI index if available, else Liftie on GitHub).",
+        help="List resorts supported by ski-resort-status.",
     )
     parser.add_argument(
         "--raw-json",
         action="store_true",
-        help="Print full resort JSON after the table (debugging).",
+        help="Print full JSON from the library after the report.",
     )
     args = parser.parse_args()
 
     if args.list_resorts:
-        load_dotenv_file()
-        key = (os.environ.get("RAPIDAPI_KEY") or "").strip()
-        api_payload: Any | None = None
-        if key:
-            api_payload = try_fetch_resort_index_api(key)
-        if api_payload is not None:
-            rows = _iter_slug_name_pairs(api_payload)
-            if rows:
-                print_resort_index_rows(
-                    rows,
-                    "Source: Ski API (RapidAPI) index response.",
-                )
-                return
-            print(
-                "RapidAPI returned JSON but no resort list was recognized; "
-                "falling back to Liftie slugs on GitHub.",
-                file=sys.stderr,
-            )
-        else:
-            print(
-                "No working RapidAPI list endpoint (or no RAPIDAPI_KEY); "
-                "using Liftie slugs from GitHub.",
-                file=sys.stderr,
-            )
-        print_resort_slug_only_list(fetch_liftie_slugs_from_github())
+        out = run_bridge("--list")
+        if not out.get("ok"):
+            print(out.get("error", out), file=sys.stderr)
+            sys.exit(1)
+        print_supported_resorts(out)
         return
 
-    key = load_api_key(required=True)
-
-    slug = (args.resort or "").strip()
-    if not slug:
-        slug = input("Resort slug (e.g. palisades): ").strip()
-    if not slug:
-        print("No resort slug given.", file=sys.stderr)
+    rid = (args.resort or "").strip()
+    if not rid:
+        rid = input("Resort id (e.g. les-trois-vallees): ").strip()
+    if not rid:
+        print("No resort id given.", file=sys.stderr)
         sys.exit(1)
 
-    slug = resolve_resort_slug(slug)
-    data = fetch_resort(key, slug)
-    print_resort_table(slug, data)
+    out = run_bridge(rid)
+    if not out.get("ok"):
+        print(out.get("error", "Unknown error"), file=sys.stderr)
+        print("Run: python ski_trails.py --list-resorts", file=sys.stderr)
+        sys.exit(1)
+
+    data = out.get("data")
+    if not isinstance(data, dict):
+        print("Unexpected data shape from bridge.", file=sys.stderr)
+        sys.exit(1)
+
+    print_resort_report(data)
     if args.raw_json:
-        print()
-        print(json.dumps(data, indent=2))
+        print(json.dumps(data, indent=2, ensure_ascii=False))
 
 
 if __name__ == "__main__":

@@ -1,40 +1,45 @@
 # skimap
 
-Small CLI for live ski resort lift status via the [Ski API](https://skiapi.com/) on [RapidAPI](https://rapidapi.com/random-shapes-random-shapes-default/api/ski-resorts-and-conditions) (Ski Resorts and Conditions). It prints each lift in a table with open/closed (and related) states.
+CLI that prints **detailed live lift and run (trail) status** using **[ski-resort-status](https://www.npmjs.com/package/ski-resort-status)** from the **[ski-lift-status](https://github.com/marcushyett/ski-lift-status)** project. Data is matched to **[OpenSkiMap](https://openskimap.org/)** IDs.
+
+Coverage is **whatever that library supports** (today mostly **Lumiplan**-based areas in France; the list grows over time). This replaces the earlier RapidAPI-only flow.
+
+## Requirements
+
+- **Python 3.10+**
+- **Node.js 18+** (`node` on your PATH)
 
 ## Setup
 
-1. Create a [RapidAPI](https://rapidapi.com/) account and subscribe to **Ski Resorts and Conditions**.
+```bash
+git clone https://github.com/philipnisevich/skimap.git
+cd skimap
+npm install
+```
 
-2. Copy the environment template and add your key:
-
-   ```bash
-   cp .env.example .env
-   ```
-
-   Set `RAPIDAPI_KEY` in `.env` to your RapidAPI application key.
-
-3. Install dependencies (Python 3.10+ recommended):
-
-   ```bash
-   python3 -m venv .venv
-   source .venv/bin/activate   # Windows: .venv\Scripts\activate
-   pip install -r requirements.txt
-   ```
+No Python `pip` packages are required.
 
 ## Usage
 
 ```bash
-python ski_trails.py palisades
-python ski_trails.py                    # prompts for resort slug
-python ski_trails.py --list-resorts     # slugs (GitHub Liftie index if RapidAPI has no list endpoint)
-python ski_trails.py brighton --raw-json
+python ski_trails.py --list-resorts
+python ski_trails.py les-trois-vallees
+python ski_trails.py --raw-json espace-diamant
 ```
 
-**Slugs:** Many resorts match folder names from [Liftie](https://github.com/pirxpilot/liftie) under `lib/resorts/`. Palisades Tahoe uses `palisades` (not `alpine`); the script maps common legacy names to `palisades`.
+- **`--list-resorts`** — IDs and names from `getSupportedResorts()`.
+- **`--raw-json`** — Full JSON from `fetchResortStatus()` after the human-readable sections.
 
-**Note:** This API exposes **lift** status for most resorts, not per-trail geometry. The script still prefers trail/run fields when the payload includes them.
+Equivalent:
+
+```bash
+npm run resorts
+```
+
+## How it works
+
+Python runs a small Node bridge: [`node/ski_resort_bridge.cjs`](node/ski_resort_bridge.cjs), which calls `ski-resort-status` and prints JSON on stdout for Python to format.
 
 ## License
 
-Use follows RapidAPI and upstream data providers’ terms.
+Your use of resort data is subject to **ski-resort-status** and upstream providers. See the [ski-lift-status license](https://github.com/marcushyett/ski-lift-status/blob/main/LICENSE).

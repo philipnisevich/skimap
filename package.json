@@ -1,0 +1,23 @@
+{
+  "name": "skimap",
+  "version": "1.0.0",
+  "description": "CLI for live ski lift and run status via ski-resort-status (ski-lift-status).",
+  "scripts": {
+    "resorts": "node node/ski_resort_bridge.cjs --list"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/philipnisevich/skimap.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/philipnisevich/skimap/issues"
+  },
+  "homepage": "https://github.com/philipnisevich/skimap#readme",
+  "dependencies": {
+    "ski-resort-status": "^2.2.0"
+  }
+}
